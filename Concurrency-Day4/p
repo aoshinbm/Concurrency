@@ -1,0 +1,124 @@
+package main
+
+import (
+	"fmt"
+	"sync"
+	"time"
+)
+
+// define variables
+var numPhilo int = 5
+var numCS int = 5
+var eatTimes int = 3
+var numEatingPhilo int = 2
+
+type Host struct {
+	// channel for allowed philosopher for eating
+	eatingChannel chan *Philo
+	// channel for submitting request to host
+	requestChannel chan *Philo
+	// channel for terminate signal for the daemon
+	quitChannel chan int
+	// bookkeeping of the current eating philosophers
+	eatingPhilos map[int]bool
+	// mutex to lock the modification of the eatingPhilos variable
+	mu sync.Mutex
+}
+
+// daemon function to manage the allowed philosophers
+func (pHost *Host) manage() {
+	// daemon serving in the backend and only exits for terminate signal
+	for {
+		select {
+		// handle submitted request
+		case pPhilo := <-pHost.requestChannel:
+			fmt.Printf("%d submitted request\n", pPhilo.idx)
+			select {
+			// channel is not full
+			case pHost.eatingChannel <- pPhilo:
+				pHost.eatingPhilos[pPhilo.idx] = true
+			// channel is full
+			default:
+				finished := <-pHost.eatingChannel
+				pHost.eatingChannel <- pPhilo
+				currEating := make([]int, 0, numPhilo)
+				// update bookkeeping table
+				for tmpIdx, eating := range pHost.eatingPhilos {
+					if eating {
+						currEating = append(currEating, tmpIdx)
+					}
+				}
+				fmt.Printf("%v have been eating, clearing up %d for %d\n", currEating, finished.idx, pPhilo.idx)
+				pHost.eatingPhilos[finished.idx] = false
+				pHost.eatingPhilos[pPhilo.idx] = true
+			}
+
+		case <-pHost.quitChannel:
+			fmt.Println("stop hosting")
+			return
+		}
+	}
+}
+
+type ChopS struct {
+	mu sync.Mutex
+}
+
+type Philo struct {
+	// index of the philosopher
+	idx int
+	// number of times the philosopher has eaten
+	numEat          int
+	leftCS, rightCS *ChopS
+	host            *Host
+}
+
+func (pPhilo *Philo) eat(wg *sync.WaitGroup) {
+	for pPhilo.numEat < eatTimes {
+
+		// once the philosopher intends to eat, lock the corresponding chopsticks
+		pPhilo.leftCS.mu.Lock()
+		pPhilo.rightCS.mu.Lock()
+
+		// reserve a slot in the channel for eating
+		// if channel buffer is full, this is blocked until channel space is released
+		pPhilo.host.requestChannel <- pPhilo
+
+		pPhilo.numEat++
+		fmt.Printf("starting to eat %d for %d time\n", pPhilo.idx, pPhilo.numEat)
+		time.Sleep(time.Millisecond)
+		fmt.Printf("finishing eating %d for %d time\n", pPhilo.idx, pPhilo.numEat)
+
+		pPhilo.rightCS.mu.Unlock()
+		pPhilo.leftCS.mu.Unlock()
+		wg.Done()
+	}
+}
+
+func main() {
+	var wg sync.WaitGroup
+	host := Host{
+		eatingChannel:  make(chan *Philo, numEatingPhilo),
+		requestChannel: make(chan *Philo),
+		quitChannel:    make(chan int),
+		eatingPhilos:   make(map[int]bool),
+	}
+	CSticks := make([]*ChopS, numCS)
+	for i := 0; i < numCS; i++ {
+		CSticks[i] = new(ChopS)
+
+	}
+	philos := make([]*Philo, numPhilo)
+	for i := 0; i < numPhilo; i++ {
+		philos[i] = &Philo{idx: i + 1, numEat: 0, leftCS: CSticks[i], rightCS: CSticks[(i+1)%5], host: &host}
+	}
+
+	go host.manage()
+
+	wg.Add(numPhilo * eatTimes)
+	for i := 0; i < numPhilo; i++ {
+		go philos[i].eat(&wg)
+	}
+	wg.Wait()
+	host.quitChannel <- 1
+}
